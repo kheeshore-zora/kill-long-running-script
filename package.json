@@ -1,6 +1,6 @@
 {
   "name": "kill-long-running-script",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A CLI tool and library to find and kill processes running longer than a specified duration.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
