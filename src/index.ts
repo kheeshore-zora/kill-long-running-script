@@ -1,6 +1,7 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import fetch from 'node-fetch';
+import * as os from 'os';
 
 const execPromise = promisify(exec);
 
@@ -23,20 +24,37 @@ export async function killLongRunningScript(options: KillOptions): Promise<void>
   }
 
   try {
-    // List processes with their elapsed time (etimes) and command arguments
-    // etimes is elapsed time in seconds
-    const { stdout } = await execPromise(`ps -eo pid,etimes,args --sort=-etimes`);
-    
-    const lines = stdout.trim().split('\n');
-    const processes = lines.slice(1); // Skip header
+    let processes: string[] = [];
+    const platform = os.platform();
+
+    if (platform === 'linux') {
+       // Linux supports 'etimes' (seconds) natively
+       const { stdout } = await execPromise(`ps -eo pid,etimes,args --sort=-etimes`);
+       processes = stdout.trim().split('\n').slice(1);
+    } else if (platform === 'darwin') {
+       // macOS (BSD) uses 'etime' (formatted string) and 'command'
+       const { stdout } = await execPromise(`ps -eo pid,etime,command`);
+       processes = stdout.trim().split('\n').slice(1);
+    } else {
+        throw new Error(`Unsupported platform: ${platform}. Only Linux and macOS are supported.`);
+    }
 
     let killedCount = 0;
 
     for (const line of processes) {
       const parts = line.trim().split(/\s+/);
       const pid = parts[0];
-      const elapsedSeconds = parseInt(parts[1], 10);
-      const command = parts.slice(2).join(' ');
+      let elapsedSeconds = 0;
+      let command = '';
+
+      if (platform === 'linux') {
+          elapsedSeconds = parseInt(parts[1], 10);
+          command = parts.slice(2).join(' ');
+      } else if (platform === 'darwin') {
+          const timeStr = parts[1];
+          elapsedSeconds = parseTime(timeStr);
+          command = parts.slice(2).join(' ');
+      }
 
       // Check if matches target script and avoid killing self
       if (command.includes(scriptName) && !command.includes('kill-long-running-script')) {
@@ -64,7 +82,7 @@ export async function killLongRunningScript(options: KillOptions): Promise<void>
     }
 
     if (killedCount === 0 && !dryRun) {
-      // console.log(`No long-running processes found for script: "${scriptName}" exceeding ${maxDurationSeconds}s.`);
+       // console.log(`No long-running processes found for script: "${scriptName}" exceeding ${maxDurationSeconds}s.`);
     }
 
   } catch (err: any) {
@@ -72,6 +90,32 @@ export async function killLongRunningScript(options: KillOptions): Promise<void>
     throw err;
   }
 }
+
+// Helper to parse BSD time format: [[dd-]hh:]mm:ss
+function parseTime(timeStr: string): number {
+    let days = 0;
+    let time = timeStr;
+
+    if (timeStr.includes('-')) {
+        const parts = timeStr.split('-');
+        days = parseInt(parts[0], 10);
+        time = parts[1];
+    }
+
+    const parts = time.split(':').map(p => parseInt(p, 10));
+    let seconds = 0;
+
+    if (parts.length === 3) {
+        // hh:mm:ss
+        seconds = parts[0] * 3600 + parts[1] * 60 + parts[2];
+    } else if (parts.length === 2) {
+        // mm:ss
+        seconds = parts[0] * 60 + parts[1];
+    }
+
+    return seconds + (days * 86400);
+}
+
 
 async function sendSlackNotification(webhookUrl: string, scriptName: string, pid: string, duration: number, command: string) {
     try {

@@ -1,4 +1,37 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
     function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
     return new (P || (P = Promise))(function (resolve, reject) {
@@ -16,6 +49,7 @@ exports.killLongRunningScript = killLongRunningScript;
 const child_process_1 = require("child_process");
 const util_1 = require("util");
 const node_fetch_1 = __importDefault(require("node-fetch"));
+const os = __importStar(require("os"));
 const execPromise = (0, util_1.promisify)(child_process_1.exec);
 /**
  * Finds and kills a process if it has been running longer than the specified duration.
@@ -28,17 +62,36 @@ function killLongRunningScript(options) {
             throw new Error('Script name is required.');
         }
         try {
-            // List processes with their elapsed time (etimes) and command arguments
-            // etimes is elapsed time in seconds
-            const { stdout } = yield execPromise(`ps -eo pid,etimes,args --sort=-etimes`);
-            const lines = stdout.trim().split('\n');
-            const processes = lines.slice(1); // Skip header
+            let processes = [];
+            const platform = os.platform();
+            if (platform === 'linux') {
+                // Linux supports 'etimes' (seconds) natively
+                const { stdout } = yield execPromise(`ps -eo pid,etimes,args --sort=-etimes`);
+                processes = stdout.trim().split('\n').slice(1);
+            }
+            else if (platform === 'darwin') {
+                // macOS (BSD) uses 'etime' (formatted string) and 'command'
+                const { stdout } = yield execPromise(`ps -eo pid,etime,command`);
+                processes = stdout.trim().split('\n').slice(1);
+            }
+            else {
+                throw new Error(`Unsupported platform: ${platform}. Only Linux and macOS are supported.`);
+            }
             let killedCount = 0;
             for (const line of processes) {
                 const parts = line.trim().split(/\s+/);
                 const pid = parts[0];
-                const elapsedSeconds = parseInt(parts[1], 10);
-                const command = parts.slice(2).join(' ');
+                let elapsedSeconds = 0;
+                let command = '';
+                if (platform === 'linux') {
+                    elapsedSeconds = parseInt(parts[1], 10);
+                    command = parts.slice(2).join(' ');
+                }
+                else if (platform === 'darwin') {
+                    const timeStr = parts[1];
+                    elapsedSeconds = parseTime(timeStr);
+                    command = parts.slice(2).join(' ');
+                }
                 // Check if matches target script and avoid killing self
                 if (command.includes(scriptName) && !command.includes('kill-long-running-script')) {
                     if (elapsedSeconds > maxDurationSeconds) {
@@ -71,6 +124,27 @@ function killLongRunningScript(options) {
             throw err;
         }
     });
+}
+// Helper to parse BSD time format: [[dd-]hh:]mm:ss
+function parseTime(timeStr) {
+    let days = 0;
+    let time = timeStr;
+    if (timeStr.includes('-')) {
+        const parts = timeStr.split('-');
+        days = parseInt(parts[0], 10);
+        time = parts[1];
+    }
+    const parts = time.split(':').map(p => parseInt(p, 10));
+    let seconds = 0;
+    if (parts.length === 3) {
+        // hh:mm:ss
+        seconds = parts[0] * 3600 + parts[1] * 60 + parts[2];
+    }
+    else if (parts.length === 2) {
+        // mm:ss
+        seconds = parts[0] * 60 + parts[1];
+    }
+    return seconds + (days * 86400);
 }
 function sendSlackNotification(webhookUrl, scriptName, pid, duration, command) {
     return __awaiter(this, void 0, void 0, function* () {
